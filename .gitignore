@@ -2,6 +2,7 @@
 .venv
 /data
 .DS_Store
+/notebooks/personal
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

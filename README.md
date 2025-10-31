@@ -1,7 +1,7 @@
 # Guia de Documentacion
 
 - Configuración del Entorno de Desarrollo 🐍
-- Cargar los releases del EEG Challenge
+- Descargar los releases del EEG Challenge
 
 ## Configuración del Entorno de Desarrollo 🐍
 
@@ -96,11 +96,13 @@ deactivate
 
 Tu entorno está configurado correctamente.  
 
-## Cargar los releases del EEG Challenge
+## Descargar los releases del EEG Challenge
 
-Para cargar los datos en nuestra maquina, debemos  correr el script `/load_data`.
+Para cargar los datos en nuestra maquina, debemos  correr el script `scripts/donwload_data.py`.
 Dado que los sripts estan escritos para ser corridos desde el terminnal, deben anteponer `-m` y utilizar puntos en vez de slashes.
 
 ```bash
-python3 -m scripts.load_data
+python3 -m scripts.download_data
 ```
+
+Con esto descargaras los releases del EEG Challenge. Una vez que has descargado los releases, no es necesario descargarlos de nuevo, y en cambio, para utilizarlos debemos utilizar el metodo `load_ccd_dataset()` que se encuentra en `src/data/load_releases.py`
