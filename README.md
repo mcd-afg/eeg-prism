@@ -99,3 +99,49 @@ python3 -m scripts.download_data
 ```
 
 Con esto descargaras los releases del EEG Challenge. Una vez que has descargado los releases, no es necesario descargarlos de nuevo, y en cambio, para utilizarlos debemos utilizar el metodo `load_ccd_dataset()` que se encuentra en `src/data/load_releases.py`
+
+## Eliminar tasks que no sean RestingState
+
+Para eliminar los tasks descargados por `EEGChallengeDataset` a traves del script `scripts/downnload_data.py` podemos utilizar el script a traves de bash (MacOS/Linux) o python (cualquier OS)
+
+### Bash usando clean_eeg.sh
+
+Otorga permisos para ejecucion:
+
+```bash
+chmod +x scripts/clean_eeg.sh
+```
+
+Ahora puedes ejecutarlo, y solo nnecesitas especificar la ruta del directorio que contiene los datos. Por ejemplo, si descargaste los datos a partir del script `scripts/downnload_data.py`, la ruta del release 1 seria asi:
+
+```bash
+./scripts/clean_eeg.py data/ds005506-bdf-mini
+```
+
+### Python usando clean_eeg.py
+
+Otorga permisos para ejecucion:
+
+```bash
+chmod +x scripts/clean_eeg.py
+```
+
+Ahora puedes ejecutarlo, y solo nnecesitas especificar la ruta del directorio que contiene los datos. Por ejemplo, si descargaste los datos a partir del script `scripts/downnload_data.py`, la ruta del release 1 seria asi:
+
+```bash
+./scripts/clean_eeg.py data/ds005506-bdf-mini
+```
+
+## Ejecucion --dry-run
+
+Tanto el script de python como el bash tienen la opcion para ejecutarse --dry-run. En este formato te traera los datos que seran borrados, pero sin borrarlos aun. Para borrarlos debes sacarle el --dry-run.
+
+```bash
+./scripts/clean_eeg.py data/ds005506-bdf-mini --dry-run
+
+```
+
+```bash
+./scripts/clean_eeg.sh data/ds005506-bdf-mini --dry-run
+
+```
