@@ -115,7 +115,7 @@ chmod +x scripts/clean_eeg.sh
 Ahora puedes ejecutarlo, y solo nnecesitas especificar la ruta del directorio que contiene los datos. Por ejemplo, si descargaste los datos a partir del script `scripts/downnload_data.py`, la ruta del release 1 seria asi:
 
 ```bash
-./scripts/clean_eeg.py data/ds005506-bdf-mini
+./scripts/clean_eeg.ph data/ds005506-bdf-mini
 ```
 
 ### Python usando clean_eeg.py
