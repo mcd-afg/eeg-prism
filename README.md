@@ -17,13 +17,6 @@ Asegúrate de tener instalado:
 - **Python 3.10+**
 - **pip** (gestor de paquetes de Python)
 
-Puedes verificar las versiones con:
-
-```bash
-python3 --version
-pip --version
-```
-
 ---
 
 ### 🧱 Crear el entorno virtual
@@ -31,7 +24,7 @@ pip --version
 Ejecuta el siguiente comando en la raíz del proyecto para crear un entorno virtual:
 
 ```bash
-python3 -m venv .venv
+python3.10 -m venv .venv
 ```
 
 ---
