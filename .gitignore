@@ -3,6 +3,7 @@
 /data
 .DS_Store
 /notebooks/personal
+/media
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

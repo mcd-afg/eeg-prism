@@ -77,10 +77,6 @@ deactivate
 
 - Si instalas nuevos paquetes, recuerda actualizar el archivo de requerimientos:
 
-  ```bash
-  pip freeze > requirements.txt
-  ```
-
 - Si deseas eliminar el entorno virtual, simplemente borra la carpeta `.venv`.
 
 ---
