@@ -1,7 +1,8 @@
 # Guia de Documentacion
 
-- Configuración del Entorno de Desarrollo 🐍
-- Descargar los releases del EEG Challenge
+- [Configuración del Entorno de Desarrollo 🐍](https://github.com/mcd-afg/eeg-prism?tab=readme-ov-file#configuraci%C3%B3n-del-entorno-de-desarrollo-)
+- [Descargar los releases del EEG Challenge](https://github.com/mcd-afg/eeg-prism?tab=readme-ov-file#descargar-los-releases-del-eeg-challenge)
+- [Eliminar Tasks que no sean RestingState](https://github.com/mcd-afg/eeg-prism?tab=readme-ov-file#eliminar-tasks-que-no-sean-restingstate)
 
 ## Configuración del Entorno de Desarrollo 🐍
 
@@ -128,7 +129,7 @@ Ahora puedes ejecutarlo, y solo nnecesitas especificar la ruta del directorio qu
 ./scripts/clean_eeg.py data/ds005506-bdf-mini
 ```
 
-## Ejecucion --dry-run
+### Ejecucion --dry-run
 
 Tanto el script de python como el bash tienen la opcion para ejecutarse --dry-run. En este formato te traera los datos que seran borrados, pero sin borrarlos aun. Para borrarlos debes sacarle el --dry-run.
 
