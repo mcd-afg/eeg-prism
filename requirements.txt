@@ -3,3 +3,4 @@ braindecode
 jupyter
 lightning
 ipykernel
+imblearn
