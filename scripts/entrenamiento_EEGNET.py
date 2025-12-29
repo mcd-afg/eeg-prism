@@ -1,308 +1,250 @@
-# ==============================================================
-# 🧠 ENTRENAMIENTO DE EEGNet EN EL EEGChallengeDataset
-# ==============================================================
+"""
+EEGNet training script with cropped decoding using Braindecode + Skorch.
 
-# === 1️⃣ LIBRERÍAS E IMPORTS ===
+Pipeline:
+1. GPU check and environment setup
+2. Load preprocessed EEG data (.fif + .json)
+3. Dataset construction and filtering
+4. Model definition (EEGNet) and cropped setup
+5. Windowing (fixed-length windows)
+6. Train / validation / test split
+7. Training with CosineAnnealingLR
+8. Logging, saving metrics and model state
+"""
+
+# ==============================================================
+# 1. GPU CHECK & BASIC ENVIRONMENT SETUP
+# ==============================================================
 import os
-import math
-import random
 import json
 from pathlib import Path
-from joblib import Parallel, delayed
 
 import numpy as np
 import pandas as pd
-import mne
 import torch
-from torch import optim
-from torch.utils.data import DataLoader, Dataset
-from torch.nn.functional import l1_loss
+import mne
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-
-from braindecode.preprocessing import create_fixed_length_windows
-from braindecode.datasets.base import EEGWindowsDataset, BaseConcatDataset, BaseDataset
-from braindecode.models import EEGNet, EEGNeX
-from eegdash import EEGChallengeDataset
-
-import matplotlib.pyplot as plt
-
-
-# ==============================================================
-# ⚙️ CONFIGURACIÓN DE DISPOSITIVO Y CUDA
-# ==============================================================
+#Nuevo
+torch.set_num_threads(12)
+torch.set_num_interop_threads(4)
 
 print(f"GPUs disponibles: {torch.cuda.device_count()}")
 print(f"CUDA disponible: {torch.cuda.is_available()}")
-
 if torch.cuda.is_available():
-    print(f"Usando GPU: {torch.cuda.get_device_name(0)}")
+    print(f"GPU en uso: {torch.cuda.get_device_name(0)}")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-if torch.cuda.is_available():
-    torch.backends.cudnn.benchmark = True  # mejora eficiencia al fijar tamaños
-
+cuda = torch.cuda.is_available()
+device = "cuda" if cuda else "cpu"
 
 # ==============================================================
-# 📦 CLASE WRAPPER DE DATASET
+# 2. LIBRERÍAS BRAINDCODE / SKORCH
 # ==============================================================
+from braindecode.datasets.base import BaseDataset, BaseConcatDataset
+from braindecode.preprocessing import create_fixed_length_windows
+from braindecode.models import EEGNet
+from braindecode.util import set_random_seeds
+from braindecode import EEGClassifier
+from braindecode.training import CroppedLoss
 
-class DatasetWrapper(BaseDataset):
-    """
-    Envuelve un EEGWindowsDataset y aplica un recorte aleatorio
-    para aumentar la variabilidad temporal.
-    """
-    def __init__(
-        self,
-        dataset: EEGWindowsDataset,
-        crop_size_samples: int,
-        target_name: str = "p_factor_category",
-        seed=None,
-    ):
-        self.dataset = dataset
-        self.crop_size_samples = crop_size_samples
-        self.target_name = target_name
-        self.rng = random.Random(seed)
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, index):
-        X, _, crop_inds = self.dataset[index]
-        target = int(self.dataset.description[self.target_name])
-
-        infos = {
-            "subject": self.dataset.description["subject"],
-            "sex": self.dataset.description["sex"],
-            "age": float(self.dataset.description["age"]),
-            "task": self.dataset.description["task"],
-            "session": self.dataset.description.get("session", ""),
-            "run": self.dataset.description.get("run", ""),
-        }
-
-        i_window_in_trial, i_start, i_stop = crop_inds
-        assert i_stop - i_start >= self.crop_size_samples, f"{i_stop=} {i_start=}"
-
-        start_offset = self.rng.randint(0, i_stop - i_start - self.crop_size_samples)
-        i_start += start_offset
-        i_stop = i_start + self.crop_size_samples
-        X = X[:, start_offset : start_offset + self.crop_size_samples]
-
-        return X, target, (i_window_in_trial, i_start, i_stop), infos
-
+from skorch.helper import predefined_split
+from skorch.callbacks import LRScheduler, PrintLog
 
 # ==============================================================
-# 📁 CARGA DE ARCHIVOS Y CREACIÓN DE DATASETS
+# 3. RANDOM SEEDS (REPRODUCIBILITY)
 # ==============================================================
+seed = 20200220
+set_random_seeds(seed=seed, cuda=cuda)
 
+if cuda:
+    torch.backends.cudnn.benchmark = True
+
+# ==============================================================
+# 4. LOAD DATASETS (.fif + .json)
+# ==============================================================
 data_path = Path("preprocessed_data")
-OUTPUT_DIR = Path("preprocessed_data")
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-# Mostrar número de archivos disponibles
-all_files = list(data_path.glob("*.fif"))
-print(f"Número de archivos .fif en 'preprocessed_data': {len(all_files)}")
-
-# Mapeo de categorías de texto a enteros
 mapping = {"bajo": 0, "medio": 1, "alto": 2}
 
 datasets_list = []
-SFREQ = 100  # Hz
 
-for fif_path in OUTPUT_DIR.glob("*_standardized_eeg.fif"):
-    subj_id = fif_path.stem.split("_standardized_eeg")[0]
+for fif_path in data_path.glob("*_standardized_eeg.fif"):
+    subj = fif_path.stem.split("_standardized_eeg")[0]
     raw = mne.io.read_raw_fif(fif_path, preload=False)
 
-    with open(OUTPUT_DIR / f"{subj_id}_description.json", "r") as f:
-        description = json.load(f)
+    with open(data_path / f"{subj}_description.json", "r") as f:
+        desc = json.load(f)
 
-    cat = description.get("p_factor_category", None)
-    if isinstance(cat, str):
-        description["p_factor_category"] = mapping[cat]
+    if isinstance(desc["p_factor_category"], str):
+        desc["p_factor_category"] = mapping[desc["p_factor_category"]]
 
-    ds = BaseDataset(raw=raw, description=description)
+    ds = BaseDataset(
+        raw=raw,
+        description=desc,
+        target_name="p_factor_category"
+    )
     datasets_list.append(ds)
 
-all_datasets_preproc = BaseConcatDataset(datasets_list)
-
-
-# ==============================================================
-# ✂️ DIVISIÓN DE DATOS (TRAIN / VALID / TEST)
-# ==============================================================
-
-descriptions = all_datasets_preproc.description
-p_factors = descriptions["p_factor_category"]
-
-train_idx, test_idx = train_test_split(
-    range(len(all_datasets_preproc.datasets)),
-    test_size=0.2,
-    stratify=p_factors,
-    random_state=42,
-)
-
-train_set = BaseConcatDataset([all_datasets_preproc.datasets[i] for i in train_idx])
-test_set = BaseConcatDataset([all_datasets_preproc.datasets[i] for i in test_idx])
-
-print(f"Train: {len(train_set.datasets)} sujetos")
-print(f"Test:  {len(test_set.datasets)} sujetos")
-
-# --- División interna de train en train/valid ---
-p_factors_train = train_set.description["p_factor_category"]
-train_idx_inner, valid_idx = train_test_split(
-    range(len(train_set.datasets)),
-    test_size=0.2,
-    stratify=p_factors_train,
-    random_state=42,
-)
-
-train_set_inner = BaseConcatDataset([train_set.datasets[i] for i in train_idx_inner])
-valid_set = BaseConcatDataset([train_set.datasets[i] for i in valid_idx])
-
-print(f"Train interno: {len(train_set_inner.datasets)} sujetos")
-print(f"Validación: {len(valid_set.datasets)} sujetos")
-
+# Concatenate subjects
+full_dataset = BaseConcatDataset(datasets_list)
+print(f"Sujetos cargados: {len(full_dataset.datasets)}")
 
 # ==============================================================
-# 🪟 CREACIÓN DE VENTANAS TEMPORALES
+# 5. FILTER SUBJECTS BY MINIMUM RECORDING LENGTH
 # ==============================================================
+SFREQ = 100
+MIN_SECONDS = 30
 
-windows_train = create_fixed_length_windows(
-    train_set_inner,
-    window_size_samples=4 * SFREQ,   # 4s
-    window_stride_samples=2 * SFREQ, # 2s
-    drop_last_window=True,
-)
-windows_valid = create_fixed_length_windows(
-    valid_set,
-    window_size_samples=4 * SFREQ,
-    window_stride_samples=2 * SFREQ,
-    drop_last_window=True,
-)
-windows_test = create_fixed_length_windows(
-    test_set,
-    window_size_samples=4 * SFREQ,
-    window_stride_samples=2 * SFREQ,
-    drop_last_window=True,
-)
+full_dataset = BaseConcatDataset([
+    ds for ds in full_dataset.datasets
+    if ds.raw.n_times >= MIN_SECONDS * SFREQ
+])
 
-# --- Aplicar el DatasetWrapper para recorte aleatorio ---
-windows_train = BaseConcatDataset(
-    [DatasetWrapper(ds, crop_size_samples=2 * SFREQ) for ds in windows_train.datasets]
-)
-windows_valid = BaseConcatDataset(
-    [DatasetWrapper(ds, crop_size_samples=2 * SFREQ) for ds in windows_valid.datasets]
-)
-windows_test = BaseConcatDataset(
-    [DatasetWrapper(ds, crop_size_samples=2 * SFREQ) for ds in windows_test.datasets]
-)
-
+print(f"Sujetos tras filtrado: {len(full_dataset.datasets)}")
 
 # ==============================================================
-# 📤 DATALOADERS
+# 6. MODEL DEFINITION (EEGNet)
 # ==============================================================
+n_times = 3000
+n_classes = 3
+classes = list(range(n_classes))
 
-batch_size = 512
-num_workers = 4
-
-train_loader = DataLoader(
-    windows_train, batch_size=batch_size, shuffle=True,
-    num_workers=num_workers, pin_memory=True
-)
-valid_loader = DataLoader(
-    windows_valid, batch_size=batch_size, shuffle=False,
-    num_workers=num_workers, pin_memory=True
-)
-test_loader = DataLoader(
-    windows_test, batch_size=batch_size, shuffle=False,
-    num_workers=num_workers, pin_memory=True
-)
-
-
-# ==============================================================
-# 🧩 MODELO, OPTIMIZADOR Y FUNCIÓN DE PÉRDIDA
-# ==============================================================
-
-n_chans = 128
-n_outputs = 3   # bajo, medio, alto
+n_chans = full_dataset[0][0].shape[0]
 
 model = EEGNet(
-    n_chans=n_chans,
-    n_outputs=n_outputs,
-    n_times=2 * SFREQ
-).to(device)
+    n_chans,
+    n_classes,
+    n_times=n_times,
+    final_conv_length="auto",
+)
 
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
-criterion = torch.nn.CrossEntropyLoss()
+if cuda:
+    model.cuda()
 
+# Convert to dense prediction (cropped decoding)
+model.to_dense_prediction_model()
+
+n_preds_per_input = model.get_output_shape()[2]
+print(f"Predicciones por ventana: {n_preds_per_input}")
 
 # ==============================================================
-# 🚀 ENTRENAMIENTO DEL MODELO
+# 7. CREATE FIXED-LENGTH WINDOWS
 # ==============================================================
+windows_dataset = create_fixed_length_windows(
+    full_dataset,
+    window_size_samples=n_times,
+    window_stride_samples=250,
+    drop_last_window=False,
+    preload=False,
+)
 
+# ==============================================================
+# 8. TRAIN / VALID / TEST SPLIT (STRATIFIED)
+# ==============================================================
+from sklearn.model_selection import train_test_split
+
+all_idx = np.arange(len(windows_dataset.datasets))
+labels = windows_dataset.description["p_factor_category"].to_numpy()
+
+# Train (80%) / Test (20%)
+train_full_idx, test_idx = train_test_split(
+    all_idx,
+    test_size=0.2,
+    stratify=labels,
+    random_state=42
+)
+
+# Train (80%) / Valid (20%) sobre train_full
+train_idx, valid_idx = train_test_split(
+    train_full_idx,
+    test_size=0.2,
+    stratify=labels[train_full_idx],
+    random_state=42
+)
+
+train_set = BaseConcatDataset([windows_dataset.datasets[i] for i in train_idx])
+valid_set = BaseConcatDataset([windows_dataset.datasets[i] for i in valid_idx])
+test_set  = BaseConcatDataset([windows_dataset.datasets[i] for i in test_idx])
+
+print(f"Train: {len(train_set)} ventanas")
+print(f"Valid: {len(valid_set)} ventanas")
+print(f"Test : {len(test_set)} ventanas")
+
+# ==============================================================
+# 9. TRAINING CONFIGURATION
+# ==============================================================
+lr = 0.0625 * 0.01
+weight_decay = 0
+batch_size = 64
 n_epochs = 200
-history = []
 
-for epoch in range(n_epochs):
-    # --- MODO TRAIN ---
-    model.train()
-    running_loss = 0.0
-    correct, total = 0, 0
+clf = EEGClassifier(
+    model,
+    cropped=True,
+    criterion=CroppedLoss,
+    criterion__loss_function=torch.nn.functional.cross_entropy,
+    optimizer=torch.optim.AdamW,
+    optimizer__lr=lr,
+    optimizer__weight_decay=weight_decay,
+    train_split=predefined_split(valid_set),
+    iterator_train__shuffle=True,
+    #Nuevo
+    iterator_train__num_workers=8,
+    iterator_valid__num_workers=8,
+    iterator_train__pin_memory=True,
+    iterator_valid__pin_memory=True,
+    #Nuevo
+    batch_size=batch_size,
+    callbacks=[
+        "accuracy",
+        ("lr_scheduler", LRScheduler(
+            "CosineAnnealingLR",
+            T_max=n_epochs - 1
+        )),
+        PrintLog(),
+    ],
+    device=device,
+    classes=classes,
+)
 
-    for batch_idx, batch in enumerate(train_loader):
-        X, y, _, _ = batch
-        X = X.to(torch.float32).to(device)
-        y = torch.as_tensor(y, dtype=torch.long, device=device)
+# Reduce memory spikes
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.enabled = True
 
-        optimizer.zero_grad()
-        y_pred = model(X)
-        loss = criterion(y_pred, y)
-        loss.backward()
-        optimizer.step()
+# ==============================================================
+# 10. MODEL TRAINING
+# ==============================================================
+clf.fit(train_set, y=None, epochs=n_epochs)
 
-        running_loss += loss.item() * X.size(0)
-        _, preds = y_pred.max(1)
-        correct += (preds == y).sum().item()
-        total += y.size(0)
+# ==============================================================
+# 11. SAVE TRAINING LOGS
+# ==============================================================
+results_columns = [
+    "train_loss",
+    "valid_loss",
+    "train_accuracy",
+    "valid_accuracy",
+]
 
-        if batch_idx % 10 == 0:
-            print(f"Epoch {epoch+1} | Batch {batch_idx} | Loss: {loss.item():.4f}")
+df = pd.DataFrame(
+    clf.history[:, results_columns],
+    columns=results_columns,
+    index=clf.history[:, "epoch"],
+)
 
-    avg_train_loss = running_loss / len(train_loader.dataset)
-    train_acc = correct / total
+df = df.assign(
+    train_misclass=100 - 100 * df.train_accuracy,
+    valid_misclass=100 - 100 * df.valid_accuracy,
+)
 
-    # --- MODO VALIDACIÓN ---
-    model.eval()
-    valid_loss, correct, total = 0, 0, 0
-    with torch.no_grad():
-        for X, y, *_ in valid_loader:
-            X = X.to(torch.float32).to(device)
-            y = torch.as_tensor(y, dtype=torch.long, device=device)
-            y_pred = model(X)
-            loss = criterion(y_pred, y)
+df.to_csv("training_log_EEGNET.csv", index_label="epoch")
 
-            valid_loss += loss.item() * X.size(0)
-            _, preds = y_pred.max(1)
-            correct += (preds == y).sum().item()
-            total += y.size(0)
+# ==============================================================
+# 12. SAVE MODEL STATE (RESTARTABLE TRAINING)
+# ==============================================================
+clf.save_params(
+    f_params="model_params.pt",
+    f_optimizer="optimizer.pt",
+    f_history="history.json",
+)
 
-    avg_valid_loss = valid_loss / len(valid_loader.dataset)
-    valid_acc = correct / total
-
-    history.append({
-        "epoch": epoch + 1,
-        "train_loss": avg_train_loss,
-        "valid_loss": avg_valid_loss,
-        "train_accuracy": train_acc,
-        "valid_accuracy": valid_acc,
-    })
-
-    print(f"Epoch {epoch+1:02d} | Train Acc={train_acc:.3f} | Val Acc={valid_acc:.3f} | "
-          f"Train Loss={avg_train_loss:.4f} | Val Loss={avg_valid_loss:.4f}")
-
-# --- Guardar historia ---
-history_df = pd.DataFrame(history)
-torch.save(model.state_dict(), "eegnet_model.pth")
-history_df.to_csv("training_history.csv", index=False)
+print("Entrenamiento finalizado y modelo guardado.")
