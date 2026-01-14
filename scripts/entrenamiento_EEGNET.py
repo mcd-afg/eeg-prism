@@ -1,5 +1,6 @@
 """
 EEGNet training script with cropped decoding using Braindecode + Skorch.
+MODIFICADO: Incluye class weights para balancear clases minoritarias.
 
 Pipeline:
 1. GPU check and environment setup
@@ -8,8 +9,9 @@ Pipeline:
 4. Model definition (EEGNet) and cropped setup
 5. Windowing (fixed-length windows)
 6. Train / validation / test split
-7. Training with CosineAnnealingLR
-8. Logging, saving metrics and model state
+7. **CALCULAR CLASS WEIGHTS**
+8. Training with CosineAnnealingLR + weighted loss
+9. Logging, saving metrics and model state
 """
 
 # ==============================================================
@@ -169,7 +171,41 @@ print(f"Valid: {len(valid_set)} ventanas")
 print(f"Test : {len(test_set)} ventanas")
 
 # ==============================================================
-# 9. TRAINING CONFIGURATION
+# 9. CALCULAR CLASS WEIGHTS (INVERSAMENTE PROPORCIONAL)
+# ==============================================================
+from sklearn.utils.class_weight import compute_class_weight
+
+# Extraer labels del conjunto de entrenamiento
+train_labels = windows_dataset.description.iloc[train_idx]["p_factor_category"].to_numpy()
+
+# Calcular pesos inversos
+class_weights = compute_class_weight(
+    class_weight='balanced',
+    classes=np.unique(train_labels),
+    y=train_labels
+)
+
+# Convertir a tensor y mover al device
+class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+
+print("\n=== Distribución de clases en TRAIN ===")
+unique, counts = np.unique(train_labels, return_counts=True)
+for cls, count in zip(unique, counts):
+    print(f"Clase {cls}: {count} ejemplos")
+
+print("\n=== Class Weights calculados ===")
+for cls, weight in enumerate(class_weights):
+    print(f"Clase {cls}: peso = {weight:.4f}")
+
+# ==============================================================
+# 10. FUNCIÓN DE PÉRDIDA PERSONALIZADA CON CLASS WEIGHTS
+# ==============================================================
+def weighted_cross_entropy(preds, targets):
+    """Cross entropy con class weights para clases desbalanceadas"""
+    return torch.nn.functional.cross_entropy(preds, targets, weight=class_weights_tensor)
+
+# ==============================================================
+# 11. TRAINING CONFIGURATION CON CLASS WEIGHTS
 # ==============================================================
 lr = 0.0625 * 0.01
 weight_decay = 0
@@ -180,7 +216,7 @@ clf = EEGClassifier(
     model,
     cropped=True,
     criterion=CroppedLoss,
-    criterion__loss_function=torch.nn.functional.cross_entropy,
+    criterion__loss_function=weighted_cross_entropy,  # ← Función personalizada con pesos
     optimizer=torch.optim.AdamW,
     optimizer__lr=lr,
     optimizer__weight_decay=weight_decay,
@@ -211,12 +247,12 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.enabled = True
 
 # ==============================================================
-# 10. MODEL TRAINING
+# 12. MODEL TRAINING
 # ==============================================================
-clf.fit(train_set, y=None, epochs=n_epochs)
+clf.fit(train_set, y=None, epochs=200)
 
 # ==============================================================
-# 11. SAVE TRAINING LOGS
+# 13. SAVE TRAINING LOGS
 # ==============================================================
 results_columns = [
     "train_loss",
@@ -236,10 +272,10 @@ df = df.assign(
     valid_misclass=100 - 100 * df.valid_accuracy,
 )
 
-df.to_csv("training_log_EEGNET.csv", index_label="epoch")
+df.to_csv("training_log_EEGNET_weight.csv", index_label="epoch")
 
 # ==============================================================
-# 12. SAVE MODEL STATE (RESTARTABLE TRAINING)
+# 14. SAVE MODEL STATE (RESTARTABLE TRAINING)
 # ==============================================================
 clf.save_params(
     f_params="model_params.pt",
@@ -247,4 +283,5 @@ clf.save_params(
     f_history="history.json",
 )
 
-print("Entrenamiento finalizado y modelo guardado.")
+print("\nEntrenamiento finalizado y modelo guardado.")
+print(f"Los class weights utilizados fueron: {class_weights}")
