@@ -1,6 +1,5 @@
 """
 EEGNet training script with cropped decoding using Braindecode + Skorch.
-MODIFICADO: Incluye class weights para balancear clases minoritarias.
 
 Pipeline:
 1. GPU check and environment setup
@@ -9,9 +8,8 @@ Pipeline:
 4. Model definition (EEGNet) and cropped setup
 5. Windowing (fixed-length windows)
 6. Train / validation / test split
-7. **CALCULAR CLASS WEIGHTS**
-8. Training with CosineAnnealingLR + weighted loss
-9. Logging, saving metrics and model state
+7. Training with CosineAnnealingLR
+8. Logging, saving metrics and model state
 """
 
 # ==============================================================
@@ -75,13 +73,16 @@ for fif_path in data_path.glob("*_standardized_eeg.fif"):
     with open(data_path / f"{subj}_description.json", "r") as f:
         desc = json.load(f)
 
-    if isinstance(desc["p_factor_category"], str):
-        desc["p_factor_category"] = mapping[desc["p_factor_category"]]
+    # if isinstance(desc["p_factor_category"], str):
+    #     desc["p_factor_category"] = mapping[desc["p_factor_category"]]
+
+    if not isinstance(desc["p_factor"], float):
+        desc["p_factor"] = float(desc["p_factor"])
 
     ds = BaseDataset(
         raw=raw,
         description=desc,
-        target_name="p_factor_category"
+        target_name="p_factor"
     )
     datasets_list.append(ds)
 
@@ -106,14 +107,14 @@ print(f"Sujetos tras filtrado: {len(full_dataset.datasets)}")
 # 6. MODEL DEFINITION (EEGNet)
 # ==============================================================
 n_times = 3000
-n_classes = 3
-classes = list(range(n_classes))
+n_outputs = 1
+# classes = list(range(n_classes))
 
 n_chans = full_dataset[0][0].shape[0]
 
 model = EEGNet(
     n_chans,
-    n_classes,
+    n_outputs,
     n_times=n_times,
     final_conv_length="auto",
 )
@@ -150,7 +151,6 @@ labels = windows_dataset.description["p_factor_category"].to_numpy()
 train_full_idx, test_idx = train_test_split(
     all_idx,
     test_size=0.2,
-    stratify=labels,
     random_state=42
 )
 
@@ -158,7 +158,6 @@ train_full_idx, test_idx = train_test_split(
 train_idx, valid_idx = train_test_split(
     train_full_idx,
     test_size=0.2,
-    stratify=labels[train_full_idx],
     random_state=42
 )
 
@@ -171,52 +170,22 @@ print(f"Valid: {len(valid_set)} ventanas")
 print(f"Test : {len(test_set)} ventanas")
 
 # ==============================================================
-# 9. CALCULAR CLASS WEIGHTS (INVERSAMENTE PROPORCIONAL)
-# ==============================================================
-from sklearn.utils.class_weight import compute_class_weight
-
-# Extraer labels del conjunto de entrenamiento
-train_labels = windows_dataset.description.iloc[train_idx]["p_factor_category"].to_numpy()
-
-# Calcular pesos inversos
-class_weights = compute_class_weight(
-    class_weight='balanced',
-    classes=np.unique(train_labels),
-    y=train_labels
-)
-
-# Convertir a tensor y mover al device
-class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-
-print("\n=== Distribución de clases en TRAIN ===")
-unique, counts = np.unique(train_labels, return_counts=True)
-for cls, count in zip(unique, counts):
-    print(f"Clase {cls}: {count} ejemplos")
-
-print("\n=== Class Weights calculados ===")
-for cls, weight in enumerate(class_weights):
-    print(f"Clase {cls}: peso = {weight:.4f}")
-
-# ==============================================================
-# 10. FUNCIÓN DE PÉRDIDA PERSONALIZADA CON CLASS WEIGHTS
-# ==============================================================
-def weighted_cross_entropy(preds, targets):
-    """Cross entropy con class weights para clases desbalanceadas"""
-    return torch.nn.functional.cross_entropy(preds, targets, weight=class_weights_tensor)
-
-# ==============================================================
-# 11. TRAINING CONFIGURATION CON CLASS WEIGHTS
+# 9. TRAINING CONFIGURATION
 # ==============================================================
 lr = 0.0625 * 0.01
 weight_decay = 0
 batch_size = 64
 n_epochs = 200
 
-clf = EEGClassifier(
+from braindecode import EEGRegressor
+from skorch.callbacks import EpochScoring
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+reg = EEGRegressor(
     model,
     cropped=True,
     criterion=CroppedLoss,
-    criterion__loss_function=weighted_cross_entropy,  # ← Función personalizada con pesos
+    criterion__loss_function=torch.nn.functional.mse_loss,
     optimizer=torch.optim.AdamW,
     optimizer__lr=lr,
     optimizer__weight_decay=weight_decay,
@@ -230,15 +199,31 @@ clf = EEGClassifier(
     #Nuevo
     batch_size=batch_size,
     callbacks=[
-        "accuracy",
-        ("lr_scheduler", LRScheduler(
-            "CosineAnnealingLR",
-            T_max=n_epochs - 1
-        )),
-        PrintLog(),
-    ],
+    EpochScoring(
+        scoring=mean_squared_error,
+        name="train_mse",
+        on_train=True,
+        lower_is_better=True,
+    ),
+    EpochScoring(
+        scoring=mean_squared_error,
+        name="valid_mse",
+        on_train=False,
+        lower_is_better=True,
+    ),
+    EpochScoring(
+        scoring=mean_absolute_error,
+        name="valid_mae",
+        on_train=False,
+        lower_is_better=True,
+    ),
+    ("lr_scheduler", LRScheduler(
+        "CosineAnnealingLR",
+        T_max=n_epochs - 1
+    )),
+    PrintLog(),
+],
     device=device,
-    classes=classes,
 )
 
 # Reduce memory spikes
@@ -247,41 +232,41 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.enabled = True
 
 # ==============================================================
-# 12. MODEL TRAINING
+# 10. MODEL TRAINING
 # ==============================================================
-clf.fit(train_set, y=None, epochs=200)
+reg.fit(train_set, y=None, epochs=n_epochs)
 
 # ==============================================================
-# 13. SAVE TRAINING LOGS
+# 11. SAVE TRAINING LOGS
 # ==============================================================
 results_columns = [
+    "epoch",
     "train_loss",
     "valid_loss",
-    "train_accuracy",
-    "valid_accuracy",
+    "train_mse",
+    "valid_mse",
+    "train_mae",
+    "valid_mae",
+    "train_r2",
+    "valid_r2",
+    "event_lr",
 ]
 
-df = pd.DataFrame(
-    clf.history[:, results_columns],
-    columns=results_columns,
-    index=clf.history[:, "epoch"],
-)
+rows = []
 
-df = df.assign(
-    train_misclass=100 - 100 * df.train_accuracy,
-    valid_misclass=100 - 100 * df.valid_accuracy,
-)
+for row in reg.history:
+    rows.append({col: row.get(col, np.nan) for col in results_columns})
 
-df.to_csv("training_log_EEGNET_weight.csv", index_label="epoch")
+df = pd.DataFrame(rows).set_index("epoch")
 
+df.to_csv("training_log_EEGNET_regression.csv", index_label="epoch")
 # ==============================================================
-# 14. SAVE MODEL STATE (RESTARTABLE TRAINING)
+# 12. SAVE MODEL STATE (RESTARTABLE TRAINING)
 # ==============================================================
-clf.save_params(
+reg.save_params(
     f_params="model_params.pt",
     f_optimizer="optimizer.pt",
     f_history="history.json",
 )
 
-print("\nEntrenamiento finalizado y modelo guardado.")
-print(f"Los class weights utilizados fueron: {class_weights}")
+print("Entrenamiento finalizado y modelo guardado.")
